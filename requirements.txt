@@ -1,1 +1,5 @@
-pyTelegramBotAPI
+telebot
+requests
+pytube
+fpdf
+gTTS
