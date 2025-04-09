@@ -2,4 +2,6 @@ telebot
 requests
 pytube
 fpdf
-gTTS
+gtts
+pillow
+qrcode
