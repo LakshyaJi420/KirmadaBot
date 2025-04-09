@@ -1,4 +1,4 @@
-# main.py
+# bot.py
 import telebot
 import os
 
