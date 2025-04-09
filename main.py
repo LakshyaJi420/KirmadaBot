@@ -17,6 +17,9 @@ from datetime import datetime, timedelta
 API_KEY = os.environ.get("BOT_TOKEN", "7930757231:AAFHc49RHS_BGy0DIDSPK1YXlXXkUCLB6nI")
 bot = telebot.TeleBot(API_KEY)
 
+from dotenv import load_dotenv
+load_dotenv()  # Add this near the top of your file
+
 # Constants
 OWNER_ID = 7428805370  # Your owner ID
 USERS = set()
