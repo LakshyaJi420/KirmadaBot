@@ -10,12 +10,10 @@ import re
 import random
 from io import BytesIO
 from PIL import Image, ImageFilter
+import json
+from datetime import datetime, timedelta
 
 # Set API Key securely
-# Don't hardcode your API key in production, use environment variables
-# For development, you can set it like this:
-# import os
-# os.environ["BOT_TOKEN"] = "7930757231:AAFHc49RHS_BGy0DIDSPK1YXlXXkUCLB6nI"
 API_KEY = os.environ.get("BOT_TOKEN", "7930757231:AAFHc49RHS_BGy0DIDSPK1YXlXXkUCLB6nI")
 bot = telebot.TeleBot(API_KEY)
 
@@ -26,37 +24,108 @@ REFERRALS = {}
 POINTS = {}
 DAILY_BONUS = {}
 TEMP_STORAGE = {}
+PREMIUM_USERS = set()
+USAGE_LIMITS = {}
+USER_ACTIVITY = {}
+PREMIUM_COST = 100  # points to become premium
 
-# Load saved data if available (simplified - in production use a proper database)
-try:
-    with open('users.txt', 'r') as f:
-        USERS = set([int(x) for x in f.read().split()])
-    with open('points.txt', 'r') as f:
-        for line in f:
-            if line.strip():
-                user_id, points = line.strip().split(':')
-                POINTS[int(user_id)] = int(points)
-except FileNotFoundError:
-    pass
+# Affiliate links - you can add your own links here
+AFFILIATE_LINKS = {
+    "amazon": "https://amzn.to/3xXWlink",
+    "aliexpress": "https://s.click.aliexpress.com/yourlink",
+    "hostinger": "https://hostinger.com/?REFERRALCODE=yourcode",
+    "digitalocean": "https://m.do.co/c/yourcode",
+    "books": "https://amzn.to/booklink",
+    "tools": "https://amzn.to/toolslink",
+    "gadgets": "https://amzn.to/gadgetslink",
+    "vpn": "https://nordvpn.com/refer/yourcode",
+    "courses": "https://udemy.com/affiliate/yourcode"
+}
 
-# Save data function
+# Monetization products
+PRODUCTS = {
+    "premium_month": {"name": "Premium Membership (1 Month)", "price": 5, "points": 200},
+    "premium_year": {"name": "Premium Membership (1 Year)", "price": 40, "points": 2000},
+    "unlimited_downloads": {"name": "Unlimited Downloads (1 Week)", "price": 3, "points": 100},
+    "no_ads": {"name": "Remove Ads (1 Month)", "price": 2, "points": 80}
+}
+
+# Database functions (simple file-based for Railway.com)
+def load_data():
+    global USERS, POINTS, PREMIUM_USERS, REFERRALS, USAGE_LIMITS
+    try:
+        if os.path.exists('database.json'):
+            with open('database.json', 'r') as f:
+                data = json.load(f)
+                USERS = set(data.get('users', []))
+                POINTS = {int(k): v for k, v in data.get('points', {}).items()}
+                PREMIUM_USERS = set(data.get('premium', []))
+                REFERRALS = {int(k): v for k, v in data.get('referrals', {}).items()}
+                USAGE_LIMITS = {int(k): v for k, v in data.get('usage_limits', {}).items()}
+    except Exception as e:
+        print(f"Error loading data: {e}")
+
 def save_data():
-    with open('users.txt', 'w') as f:
-        f.write(' '.join([str(user) for user in USERS]))
-    with open('points.txt', 'w') as f:
-        for user_id, points in POINTS.items():
-            f.write(f"{user_id}:{points}\n")
+    try:
+        data = {
+            'users': list(USERS),
+            'points': POINTS,
+            'premium': list(PREMIUM_USERS),
+            'referrals': REFERRALS,
+            'usage_limits': USAGE_LIMITS
+        }
+        with open('database.json', 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"Error saving data: {e}")
+
+# Load data at startup
+load_data()
 
 # Utils
 def get_affiliate_message():
+    """Return a random affiliate message based on what function was used"""
+    categories = list(AFFILIATE_LINKS.keys())
+    category = random.choice(categories)
+    link = AFFILIATE_LINKS[category]
+    
     messages = [
-        "\n\n👉 Want cool tools? Check out our deals: [Buy Tools Cheap](https://amzn.to/3xXWlink)",
-        "\n\n🔥 Exclusive offers for bot users: [Check Deals](https://amzn.to/3xXWlink)",
-        "\n\n💡 Support us by checking: [Special Discounts](https://amzn.to/3xXWlink)"
+        f"\n\n👉 Love using this bot? Support us by checking out great deals on {category}: [Check it out]({link})",
+        f"\n\n🔥 Exclusive {category} offers for our bot users: [Limited Time Deals]({link})",
+        f"\n\n💡 Get amazing {category} at discounted prices: [Special Offer]({link})",
+        f"\n\n🎁 While you wait, check out these {category} deals: [Click Here]({link})"
     ]
     return random.choice(messages)
 
+def get_premium_message():
+    """Return a message to promote premium features"""
+    return "\n\n✨ *Upgrade to Premium* to remove ads and get unlimited usage! Type /premium for details."
+
+def check_user_limits(user_id):
+    """Check if user has reached their daily limits"""
+    if user_id in PREMIUM_USERS:
+        return True  # Premium users have no limits
+        
+    today = time.strftime("%Y-%m-%d")
+    
+    if user_id not in USAGE_LIMITS:
+        USAGE_LIMITS[user_id] = {"date": today, "count": 0}
+    
+    # Reset counter if it's a new day
+    if USAGE_LIMITS[user_id]["date"] != today:
+        USAGE_LIMITS[user_id] = {"date": today, "count": 0}
+    
+    # Check if user has reached daily limit (10 for free users)
+    if USAGE_LIMITS[user_id]["count"] >= 10:
+        return False
+        
+    # Increment usage count
+    USAGE_LIMITS[user_id]["count"] += 1
+    save_data()
+    return True
+
 def give_points(user_id, points=2):
+    """Add points to user account"""
     if user_id not in POINTS:
         POINTS[user_id] = 0
     POINTS[user_id] += points
@@ -64,12 +133,23 @@ def give_points(user_id, points=2):
     return POINTS[user_id]
 
 def check_daily_bonus(user_id):
+    """Give daily bonus points to user"""
     today = time.strftime("%Y-%m-%d")
     if user_id not in DAILY_BONUS or DAILY_BONUS[user_id] != today:
         DAILY_BONUS[user_id] = today
-        give_points(user_id, 1)
-        return True
-    return False
+        points = 5 if user_id in PREMIUM_USERS else 1  # Premium users get 5x bonus
+        give_points(user_id, points)
+        return points
+    return 0
+
+def track_activity(user_id, action):
+    """Track user activity for analytics"""
+    if user_id not in USER_ACTIVITY:
+        USER_ACTIVITY[user_id] = []
+    USER_ACTIVITY[user_id].append({
+        "action": action,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
 
 # Main menu markup
 def get_main_menu():
@@ -86,7 +166,20 @@ def get_main_menu():
         types.InlineKeyboardButton("🖼️ Image Effects", callback_data='image'),
         types.InlineKeyboardButton("🎁 Refer & Earn", callback_data='refer')
     )
-    markup.add(types.InlineKeyboardButton("💰 My Points", callback_data='points'))
+    markup.add(
+        types.InlineKeyboardButton("💰 My Points", callback_data='points'),
+        types.InlineKeyboardButton("✨ Premium", callback_data='premium')
+    )
+    
+    # Add occasional promotional button
+    if random.randint(1, 5) == 1:  # 20% chance to show promo
+        promo_buttons = [
+            types.InlineKeyboardButton("🛍️ Shop Deals", url=AFFILIATE_LINKS['amazon']),
+            types.InlineKeyboardButton("📚 Learn More", url=AFFILIATE_LINKS['courses']),
+            types.InlineKeyboardButton("🔒 Get VPN", url=AFFILIATE_LINKS['vpn'])
+        ]
+        markup.add(random.choice(promo_buttons))
+    
     return markup
 
 # Start Command
@@ -96,8 +189,8 @@ def start(message):
     USERS.add(user_id)
     
     # Daily bonus
-    is_bonus = check_daily_bonus(user_id)
-    bonus_msg = "\n🎁 You got 1 bonus point today!" if is_bonus else ""
+    bonus = check_daily_bonus(user_id)
+    bonus_msg = f"\n🎁 You got {bonus} bonus point{'s' if bonus > 1 else ''} today!" if bonus else ""
     
     # Referral logic
     if message.text.startswith("/start "):
@@ -111,14 +204,25 @@ def start(message):
                 earned = give_points(ref_id, 5)
                 bot.send_message(ref_id, f"🎉 User {message.from_user.first_name} joined using your referral link! You earned 5 points. Total: {earned}")
     
+    # Track activity
+    track_activity(user_id, "start")
     save_data()
     
     welcome_text = f"""
 ✨ *Welcome to KirmadaTheBot* ✨
 
-Download, Convert, Share — All in One Place!
-Earn rewards by sharing the bot!{bonus_msg}
+Your all-in-one solution for:
+• YouTube & Instagram downloads
+• PDF creation tools
+• Text-to-Speech conversion
+• Image effects and more!
+
+Earn rewards by using the bot and referring friends!{bonus_msg}
 """
+    
+    # Add premium message for non-premium users
+    if user_id not in PREMIUM_USERS:
+        welcome_text += "\n\n💎 *Upgrade to Premium* to unlock unlimited usage and remove ads! Type /premium for details."
     
     bot.send_message(user_id, welcome_text, parse_mode="Markdown", reply_markup=get_main_menu())
 
@@ -128,10 +232,10 @@ def callback_handler(call):
     user_id = call.from_user.id
     
     if call.data == 'youtube':
-        bot.send_message(user_id, "Send a YouTube URL to download video or audio")
+        bot.send_message(user_id, "🎬 Send a YouTube URL to download video or audio")
     
     elif call.data == 'insta':
-        bot.send_message(user_id, "Send Instagram Reel or Post URL")
+        bot.send_message(user_id, "📱 Send Instagram Reel or Post URL")
     
     elif call.data == 'pdf':
         markup = types.InlineKeyboardMarkup()
@@ -141,34 +245,142 @@ def callback_handler(call):
         bot.send_message(user_id, "Choose a PDF tool:", reply_markup=markup)
     
     elif call.data == 'tts':
-        bot.send_message(user_id, "Send text starting with /speak to convert to voice")
+        bot.send_message(user_id, "🔊 Send text starting with /speak to convert to voice")
     
     elif call.data == 'image':
-        bot.send_message(user_id, "Send an image to apply filters and effects")
+        bot.send_message(user_id, "🖼️ Send an image to apply filters and effects")
     
     elif call.data == 'refer':
         link = f"https://t.me/KirmadaTheBot?start={user_id}"
         points = POINTS.get(user_id, 0)
         referrals = len(REFERRALS.get(user_id, []))
-        bot.send_message(user_id, f"🔗 *Your Referral Link*\n{link}\n\n📊 Stats:\n- Points: {points}\n- Referrals: {referrals}\n\nEarn 5 points for each new user!", parse_mode="Markdown")
+        
+        # Create share button
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("📣 Share Your Link", switch_inline_query=f"Check out this awesome Telegram bot! {link}"))
+        markup.add(types.InlineKeyboardButton("📊 View Referral Stats", callback_data='ref_stats'))
+        
+        bot.send_message(user_id, f"🔗 *Your Referral Link*\n{link}\n\n📊 Stats:\n- Points: {points}\n- Referrals: {referrals}\n\nEarn 5 points for each new user!", parse_mode="Markdown", reply_markup=markup)
+    
+    elif call.data == 'ref_stats':
+        points = POINTS.get(user_id, 0)
+        referrals = REFERRALS.get(user_id, [])
+        
+        if not referrals:
+            bot.send_message(user_id, "You haven't referred anyone yet. Share your referral link to start earning points!")
+            return
+            
+        stats = f"🏆 *Your Referral Performance*\n\n- Total Referrals: {len(referrals)}\n- Points Earned: {len(referrals) * 5}\n\n"
+        stats += "📈 *Recent Referrals*\n"
+        
+        # Show last 5 referrals with join date if we had that data
+        for i, ref in enumerate(referrals[-5:], 1):
+            stats += f"{i}. User ID: {ref}\n"
+        
+        bot.send_message(user_id, stats, parse_mode="Markdown")
     
     elif call.data == 'points':
         points = POINTS.get(user_id, 0)
-        bot.send_message(user_id, f"💰 *Your Points*: {points}\n\nEarn points by:\n- Daily login: +1 point\n- Referrals: +5 points\n- Using features: +2 points", parse_mode="Markdown")
+        
+        # Create redemption buttons
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("💎 Get Premium", callback_data='buy_premium'))
+        markup.add(types.InlineKeyboardButton("🛍️ Rewards Shop", callback_data='shop'))
+        
+        bot.send_message(user_id, f"💰 *Your Points*: {points}\n\nEarn points by:\n- Daily login: +1 point\n- Referrals: +5 points per user\n- Using features: +2 points\n\nPremium users earn 5x daily points!", parse_mode="Markdown", reply_markup=markup)
+    
+    elif call.data == 'premium':
+        premium_status = "✅ ACTIVE" if user_id in PREMIUM_USERS else "❌ INACTIVE"
+        
+        # Create premium purchase options
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("💎 1 Month Premium (100 pts)", callback_data='premium_month'))
+        markup.add(types.InlineKeyboardButton("💎💎 1 Year Premium (800 pts)", callback_data='premium_year'))
+        markup.add(types.InlineKeyboardButton("Buy Premium (PayPal)", url="https://paypal.me/yourusername"))
+        markup.add(types.InlineKeyboardButton("Back to Menu", callback_data='menu'))
+        
+        benefits = """
+✨ *Premium Benefits*:
+• No daily usage limits
+• No ads/affiliate links
+• 5x daily bonus points
+• Priority processing
+• Exclusive features
+• Premium support
+        """
+        
+        bot.send_message(user_id, f"💎 *Premium Status*: {premium_status}\n{benefits}\n\nCurrent Points: {POINTS.get(user_id, 0)}", parse_mode="Markdown", reply_markup=markup)
+    
+    elif call.data.startswith('premium_'):
+        period = call.data.split('_')[1]
+        points_needed = 100 if period == 'month' else 800
+        
+        if POINTS.get(user_id, 0) >= points_needed:
+            POINTS[user_id] -= points_needed
+            PREMIUM_USERS.add(user_id)
+            
+            # Set expiration date in a production app
+            expiry = "one month" if period == 'month' else "one year"
+            
+            bot.send_message(user_id, f"🎉 Congratulations! You are now a *Premium Member* for {expiry}!\n\nEnjoy all premium benefits including unlimited usage, no ads, and 5x daily points!", parse_mode="Markdown")
+            save_data()
+        else:
+            bot.send_message(user_id, f"❌ Not enough points! You need {points_needed} points but have {POINTS.get(user_id, 0)}.\n\nEarn more by referring friends or using the bot daily!")
+    
+    elif call.data == 'shop':
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🔄 Unlimited Downloads (100pts)", callback_data='buy_unlimited'))
+        markup.add(types.InlineKeyboardButton("🚫 Remove Ads (80pts)", callback_data='buy_no_ads'))
+        markup.add(types.InlineKeyboardButton("💰 Cash Out via PayPal (500pts)", callback_data='cash_out'))
+        markup.add(types.InlineKeyboardButton("🎁 Amazon Gift Card (1000pts)", callback_data='gift_card'))
+        markup.add(types.InlineKeyboardButton("Back", callback_data='points'))
+        
+        bot.send_message(user_id, f"🛍️ *Rewards Shop*\n\nYour Points: {POINTS.get(user_id, 0)}\n\nRedeem your points for valuable rewards!", parse_mode="Markdown", reply_markup=markup)
+    
+    elif call.data == 'buy_unlimited':
+        if POINTS.get(user_id, 0) >= 100:
+            POINTS[user_id] -= 100
+            # Set unlimited downloads for 7 days
+            bot.send_message(user_id, "✅ You've activated unlimited downloads for 7 days! Enjoy!")
+            save_data()
+        else:
+            bot.send_message(user_id, "❌ Not enough points! You need 100 points.")
+    
+    elif call.data == 'cash_out':
+        if POINTS.get(user_id, 0) >= 500:
+            bot.send_message(user_id, "💰 To cash out, please contact our admin with your PayPal email address: @admin_username")
+        else:
+            bot.send_message(user_id, "❌ Not enough points! You need 500 points for cash out.")
     
     elif call.data == 'menu':
         bot.send_message(user_id, "🏠 Main Menu", reply_markup=get_main_menu())
     
     elif call.data == 'text2pdf':
+        if not check_user_limits(user_id):
+            return bot.send_message(user_id, "⚠️ You've reached your daily limit! Upgrade to Premium for unlimited usage: /premium")
+            
         TEMP_STORAGE[user_id] = {'type': 'text2pdf', 'content': []}
         bot.send_message(user_id, "Send multiple text messages to convert into a PDF. Send /done when finished.")
     
     elif call.data == 'img2pdf':
+        if not check_user_limits(user_id):
+            return bot.send_message(user_id, "⚠️ You've reached your daily limit! Upgrade to Premium for unlimited usage: /premium")
+            
         TEMP_STORAGE[user_id] = {'type': 'img2pdf', 'content': []}
         bot.send_message(user_id, "Send multiple photos to convert into a PDF. Send /done when finished.")
     
     elif call.data.startswith('yt_'):
+        if not check_user_limits(user_id):
+            return bot.send_message(user_id, "⚠️ You've reached your daily limit! Upgrade to Premium for unlimited usage: /premium")
+            
         process_youtube_download(user_id, call.data)
+    
+    elif call.data.startswith('img_'):
+        if not check_user_limits(user_id):
+            return bot.send_message(user_id, "⚠️ You've reached your daily limit! Upgrade to Premium for unlimited usage: /premium")
+            
+        effect = call.data.split('_')[1]
+        process_image_effect(user_id, effect)
     
     # Clear the callback query
     bot.answer_callback_query(call.id)
@@ -180,18 +392,55 @@ def refer(message):
     link = f"https://t.me/KirmadaTheBot?start={uid}"
     points = POINTS.get(uid, 0)
     referrals = len(REFERRALS.get(uid, []))
-    bot.reply_to(message, f"🔗 *Your Referral Link*\n{link}\n\n📊 Stats:\n- Points: {points}\n- Referrals: {referrals}\n\nEarn 5 points for each new user!", parse_mode="Markdown")
+    
+    # Create QR code with the referral link
+    try:
+        import qrcode
+        qr = qrcode.QRCode(version=1, box_size=10, border=5)
+        qr.add_data(link)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        qr_path = f"qr_{uid}.png"
+        img.save(qr_path)
+        
+        # Create share button
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("📣 Share Your Link", switch_inline_query=f"Check out this awesome Telegram bot! {link}"))
+        
+        with open(qr_path, 'rb') as qr_file:
+            bot.send_photo(
+                uid, 
+                qr_file, 
+                caption=f"🔗 *Your Referral Link*\n{link}\n\n📊 Stats:\n- Points: {points}\n- Referrals: {referrals}\n\nEarn 5 points for each new user! Share this QR code or link with your friends.", 
+                parse_mode="Markdown",
+                reply_markup=markup
+            )
+        
+        os.remove(qr_path)
+    except ImportError:
+        # Fallback if qrcode not installed
+        bot.reply_to(message, f"🔗 *Your Referral Link*\n{link}\n\n📊 Stats:\n- Points: {points}\n- Referrals: {referrals}\n\nEarn 5 points for each new user!", parse_mode="Markdown")
 
 # YouTube
 @bot.message_handler(commands=['youtube'])
 def youtube(message):
-    bot.reply_to(message, "Send a YouTube URL to download video or audio")
+    bot.reply_to(message, "🎬 Send a YouTube URL to download video or audio")
 
 @bot.message_handler(func=lambda msg: 'youtube.com' in msg.text or 'youtu.be' in msg.text)
 def yt_download(message):
+    user_id = message.from_user.id
+    
+    # Check usage limits for non-premium users
+    if not check_user_limits(user_id):
+        return bot.reply_to(message, "⚠️ You've reached your daily limit! Upgrade to Premium for unlimited usage: /premium")
+    
     try:
         url = message.text.strip()
         yt = YouTube(url)
+        
+        # Track activity
+        track_activity(user_id, "youtube_download")
         
         # Create download options markup
         markup = types.InlineKeyboardMarkup()
@@ -204,10 +453,14 @@ def yt_download(message):
             types.InlineKeyboardButton("Cancel", callback_data="menu")
         )
         
+        # Add promotional button with 50% chance for non-premium
+        if user_id not in PREMIUM_USERS and random.random() < 0.5:
+            markup.add(types.InlineKeyboardButton("🛍️ Premium Music Tools", url=AFFILIATE_LINKS['amazon']))
+        
         bot.reply_to(message, f"📹 *{yt.title}*\n\nChoose download format:", parse_mode="Markdown", reply_markup=markup)
         
         # Give points for using the feature
-        give_points(message.from_user.id, 2)
+        give_points(user_id, 2)
         
     except Exception as e:
         bot.reply_to(message, f"Error: Could not process YouTube URL. Make sure it's valid.")
@@ -236,8 +489,15 @@ def process_youtube_download(user_id, callback_data):
             filename = f"{yt.title.replace('/', '_')[:50]}.mp4"
             stream.download(filename=filename)
             
+            # Add affiliate message for non-premium users
+            caption = f"🎬 *{yt.title}*"
+            if user_id not in PREMIUM_USERS:
+                caption += get_affiliate_message()
+            else:
+                caption += "\n\n✨ *Premium User Download* - Ad-Free"
+            
             with open(filename, 'rb') as f:
-                bot.send_video(user_id, f, caption=f"🎬 *{yt.title}*" + get_affiliate_message(), parse_mode="Markdown")
+                bot.send_video(user_id, f, caption=caption, parse_mode="Markdown")
             os.remove(filename)
             
         elif download_type == 'audio':
@@ -246,11 +506,28 @@ def process_youtube_download(user_id, callback_data):
             filename = f"{yt.title.replace('/', '_')[:50]}.mp3"
             stream.download(filename=filename)
             
+            # Add affiliate message for non-premium users
+            caption = f"🎵 *{yt.title}*"
+            if user_id not in PREMIUM_USERS:
+                caption += get_affiliate_message()
+            else:
+                caption += "\n\n✨ *Premium User Download* - Ad-Free"
+            
             with open(filename, 'rb') as f:
-                bot.send_audio(user_id, f, title=yt.title, caption=f"🎵 *{yt.title}*" + get_affiliate_message(), parse_mode="Markdown")
+                bot.send_audio(user_id, f, title=yt.title, caption=caption, parse_mode="Markdown")
             os.remove(filename)
             
         bot.delete_message(user_id, status_msg.message_id)
+        
+        # Show another feature suggestion
+        if random.random() < 0.3:  # 30% chance
+            suggestions = [
+                "🔊 Try our Text-to-Speech feature with /speak command!",
+                "📄 Convert files to PDF with /pdf command!",
+                "🖼️ Send an image to apply cool filters!",
+                "💰 Check your points balance with /points!"
+            ]
+            bot.send_message(user_id, random.choice(suggestions))
         
     except Exception as e:
         bot.send_message(user_id, f"Error processing download: {str(e)}")
@@ -258,17 +535,37 @@ def process_youtube_download(user_id, callback_data):
 # Instagram
 @bot.message_handler(commands=['insta'])
 def insta(message):
-    bot.reply_to(message, "Send Instagram Reel or Post URL")
+    bot.reply_to(message, "📱 Send Instagram Reel or Post URL")
 
 @bot.message_handler(func=lambda msg: 'instagram.com' in msg.text)
 def insta_reel(message):
+    user_id = message.from_user.id
+    
+    # Check usage limits for non-premium users
+    if not check_user_limits(user_id):
+        return bot.reply_to(message, "⚠️ You've reached your daily limit! Upgrade to Premium for unlimited usage: /premium")
+    
     try:
-        # Note: Instagram requires session cookies and has bot detection
-        # We'll provide a better guidance message instead
-        bot.reply_to(message, "🔄 Instagram downloading is currently limited on Telegram bots.\n\nTry these alternatives:\n1. Use our web tool: https://instasave.io\n2. Try the /report command if this is important to you")
+        # Track activity
+        track_activity(user_id, "instagram_download")
+        
+        # Create alternative options markup
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🌐 Online Downloader", url="https://instasave.io"))
+        markup.add(types.InlineKeyboardButton("📱 Try Instagram App", url="https://play.google.com/store/apps/details?id=com.instagram.android"))
+        
+        # Add affiliate link for non-premium users
+        if user_id not in PREMIUM_USERS:
+            markup.add(types.InlineKeyboardButton("🔒 VPN for Instagram", url=AFFILIATE_LINKS['vpn']))
+        
+        bot.reply_to(
+            message, 
+            "🔄 Instagram downloading is currently limited on Telegram bots.\n\nTry these alternatives:\n1. Use our web tool: https://instasave.io\n2. Try the /report command if this is important to you",
+            reply_markup=markup
+        )
         
         # Give points for using the feature
-        give_points(message.from_user.id, 2)
+        give_points(user_id, 2)
         
     except Exception as e:
         bot.reply_to(message, "Failed to process Instagram URL")
@@ -276,9 +573,16 @@ def insta_reel(message):
 # PDF Tools
 @bot.message_handler(commands=['pdf'])
 def pdf(message):
+    user_id = message.from_user.id
+    
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("Text to PDF", callback_data='text2pdf'))
     markup.add(types.InlineKeyboardButton("Images to PDF", callback_data='img2pdf'))
+    
+    # Add promotional button for non-premium users
+    if user_id not in PREMIUM_USERS:
+        markup.add(types.InlineKeyboardButton("📚 Premium PDF Tools", url=AFFILIATE_LINKS['books']))
+    
     markup.add(types.InlineKeyboardButton("Back to Menu", callback_data='menu'))
     bot.reply_to(message, "Choose a PDF tool:", reply_markup=markup)
 
@@ -289,8 +593,8 @@ def content_collector(message):
     # Check if we have special commands first
     if message.content_type == 'text':
         text = message.text.lower()
-        if text in ['/start', '/youtube', '/insta', '/pdf', '/refer', '/speak', '/help', '/done', '/panel', '/users', '/broadcast', '/test']:
-            return  # Let other handlers process this
+        if text.startswith('/'):
+            return  # Let other handlers process commands
             
         # Handle short greetings
         if text in ['hi', 'hello', 'hey', "what's up", 'sup']:
@@ -301,285 +605,4 @@ def content_collector(message):
         if message.content_type == 'text' and TEMP_STORAGE[uid]['type'] == 'text2pdf':
             TEMP_STORAGE[uid]['content'].append(message.text)
             count = len(TEMP_STORAGE[uid]['content'])
-            bot.reply_to(message, f"✅ Added text ({count} items). Send more or /done to finish.")
-            
-        elif message.content_type == 'photo' and TEMP_STORAGE[uid]['type'] == 'img2pdf':
-            file_info = bot.get_file(message.photo[-1].file_id)
-            downloaded = bot.download_file(file_info.file_path)
-            filename = f"photo_{uid}_{len(TEMP_STORAGE[uid]['content'])}.jpg"
-            with open(filename, 'wb') as f:
-                f.write(downloaded)
-            TEMP_STORAGE[uid]['content'].append(filename)
-            count = len(TEMP_STORAGE[uid]['content'])
-            bot.reply_to(message, f"✅ Added image ({count} images). Send more or /done to finish.")
-    
-    # Handle image for effects if not in PDF mode
-    elif message.content_type == 'photo' and uid not in TEMP_STORAGE:
-        process_image_effects(message)
-
-@bot.message_handler(commands=['done'])
-def create_pdf(message):
-    uid = message.from_user.id
-    if uid in TEMP_STORAGE and TEMP_STORAGE[uid]['content']:
-        bot.send_message(uid, "⏳ Creating your PDF...")
-        
-        pdf_type = TEMP_STORAGE[uid]['type']
-        content = TEMP_STORAGE[uid]['content']
-        
-        try:
-            pdf = FPDF()
-            pdf.set_auto_page_break(auto=True, margin=15)
-            
-            if pdf_type == 'text2pdf':
-                pdf.add_page()
-                pdf.set_font("Arial", size=12)
-                
-                for text in content:
-                    pdf.multi_cell(0, 10, text)
-                    pdf.ln(5)  # Line break between text blocks
-                
-            elif pdf_type == 'img2pdf':
-                for img_path in content:
-                    pdf.add_page()
-                    try:
-                        # Calculate aspect ratio to fit image properly
-                        img = Image.open(img_path)
-                        width, height = img.size
-                        aspect = width / height
-                        
-                        # Determine PDF page dimensions
-                        page_width = 210  # A4 width in mm
-                        page_height = 297  # A4 height in mm
-                        margin = 10
-                        
-                        if aspect > 1:  # Landscape
-                            img_width = page_width - 2*margin
-                            img_height = img_width / aspect
-                        else:  # Portrait
-                            img_height = page_height - 2*margin
-                            img_width = img_height * aspect
-                        
-                        pdf.image(img_path, x=margin, y=margin, w=img_width)
-                    except Exception as e:
-                        pdf.cell(0, 10, f"Error processing image: {str(e)}", ln=True)
-                    
-                # Clean up image files
-                for img_path in content:
-                    try:
-                        os.remove(img_path)
-                    except:
-                        pass
-            
-            file_path = f"{uid}_output.pdf"
-            pdf.output(file_path)
-            
-            with open(file_path, 'rb') as f:
-                bot.send_document(uid, f, caption="📄 Here's your PDF!" + get_affiliate_message(), parse_mode="Markdown")
-            
-            os.remove(file_path)
-            
-            # Give points for using the feature
-            give_points(uid, 2)
-            
-        except Exception as e:
-            bot.send_message(uid, f"❌ Error creating PDF: {str(e)}")
-            
-        # Clear storage
-        TEMP_STORAGE.pop(uid)
-        
-    else:
-        bot.reply_to(message, "You haven't added anything yet! Send text or images first.")
-
-# Image Effects
-def process_image_effects(message):
-    try:
-        uid = message.from_user.id
-        file_info = bot.get_file(message.photo[-1].file_id)
-        downloaded = bot.download_file(file_info.file_path)
-        
-        # Create effects options
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("Blur", callback_data="img_blur"),
-            types.InlineKeyboardButton("B&W", callback_data="img_bw"),
-            types.InlineKeyboardButton("Sharpen", callback_data="img_sharpen"),
-            types.InlineKeyboardButton("Invert", callback_data="img_invert")
-        )
-        
-        # Save image temporarily
-        img_path = f"temp_img_{uid}.jpg"
-        with open(img_path, 'wb') as f:
-            f.write(downloaded)
-        
-        # Store for later reference
-        TEMP_STORAGE[uid] = {'type': 'image', 'content': img_path}
-        
-        bot.reply_to(message, "Choose an effect to apply:", reply_markup=markup)
-        
-    except Exception as e:
-        bot.reply_to(message, f"Error processing image: {str(e)}")
-
-# Text to Voice
-@bot.message_handler(commands=['speak'])
-def tts(message):
-    text = message.text.replace('/speak', '').strip()
-    if not text:
-        return bot.reply_to(message, "Type some text after /speak like this: /speak Hello!")
-    
-    try:
-        status_msg = bot.reply_to(message, "🔊 Converting text to speech...")
-        
-        tts = gTTS(text)
-        filename = f"speech_{message.from_user.id}.mp3"
-        tts.save(filename)
-        
-        with open(filename, 'rb') as f:
-            bot.send_audio(message.chat.id, f, title="Text to Speech")
-        
-        os.remove(filename)
-        bot.delete_message(message.chat.id, status_msg.message_id)
-        
-        # Give points for using the feature
-        give_points(message.from_user.id, 2)
-        
-    except Exception as e:
-        bot.reply_to(message, f"Error converting text to speech: {str(e)}")
-
-# Help Command
-@bot.message_handler(commands=['help'])
-def help_command(message):
-    help_text = """
-🤖 *KirmadaTheBot Commands*:
-
-📹 *YouTube Download*
-- Send YouTube URL
-- Choose video or audio format
-
-📱 *Instagram Download*
-- Send Instagram reel URL
-- We'll guide you with alternatives
-
-📄 *PDF Tools*
-- /pdf - Access PDF converter tools
-- Create PDFs from text or images
-
-🔊 *Text to Speech*
-- /speak [your text] - Convert text to audio
-
-🖼️ *Image Effects*
-- Send any image to apply cool filters
-
-🎁 *Referral Program*
-- /refer - Get your referral link
-- Earn 5 points per referral
-
-💰 *Points System*
-- Daily login: +1 point
-- Using features: +2 points
-- Referrals: +5 points
-
-Need more help? Just ask!
-"""
-    bot.reply_to(message, help_text, parse_mode="Markdown")
-
-# Owner Panel
-@bot.message_handler(commands=['panel'])
-def panel(message):
-    if message.from_user.id != OWNER_ID:
-        return
-    bot.reply_to(message, """👑 *Owner Panel*
-- /broadcast <msg> - Send message to all users
-- /users - See user count
-- /stats - View usage statistics
-- /test - Test bot functionality
-- /post_daily - Send daily post to channel
-""", parse_mode="Markdown")
-
-@bot.message_handler(commands=['users'])
-def show_users(message):
-    if message.from_user.id == OWNER_ID:
-        user_count = len(USERS)
-        active_today = len(DAILY_BONUS.keys())
-        bot.reply_to(message, f"📊 *User Statistics*\n- Total Users: {user_count}\n- Active Today: {active_today}", parse_mode="Markdown")
-
-@bot.message_handler(commands=['stats'])
-def show_stats(message):
-    if message.from_user.id == OWNER_ID:
-        user_count = len(USERS)
-        referral_count = sum(len(refs) for refs in REFERRALS.values())
-        top_referrers = sorted([(uid, len(refs)) for uid, refs in REFERRALS.items()], key=lambda x: x[1], reverse=True)[:5]
-        
-        stats = f"📊 *Bot Statistics*\n- Total Users: {user_count}\n- Total Referrals: {referral_count}\n\n"
-        
-        if top_referrers:
-            stats += "*Top Referrers:*\n"
-            for uid, count in top_referrers:
-                stats += f"- ID {uid}: {count} referrals\n"
-        
-        bot.reply_to(message, stats, parse_mode="Markdown")
-
-@bot.message_handler(commands=['broadcast'])
-def broadcast(message):
-    if message.from_user.id != OWNER_ID:
-        return
-    
-    text = message.text.replace('/broadcast', '').strip()
-    if not text:
-        return bot.reply_to(message, "Please include a message to broadcast")
-    
-    sent = 0
-    failed = 0
-    
-    progress = bot.reply_to(message, f"⏳ Broadcasting: 0/{len(USERS)} users")
-    
-    for i, user in enumerate(USERS):
-        try:
-            bot.send_message(user, f"📢 *Broadcast Message*\n\n{text}", parse_mode="Markdown")
-            sent += 1
-        except:
-            failed += 1
-        
-        # Update progress every 10 users
-        if i % 10 == 0:
-            bot.edit_message_text(f"⏳ Broadcasting: {i}/{len(USERS)} users", 
-                                 message.chat.id, progress.message_id)
-    
-    bot.edit_message_text(f"✅ Broadcast complete!\n- Sent: {sent}\n- Failed: {failed}", 
-                         message.chat.id, progress.message_id)
-
-@bot.message_handler(commands=['test'])
-def test(message):
-    if message.from_user.id == OWNER_ID:
-        bot.reply_to(message, "✅ Admin mode is active. All functions working fine!")
-
-# Auto Daily Post
-@bot.message_handler(commands=['post_daily'])
-def post_daily(message):
-    if message.from_user.id != OWNER_ID:
-        return bot.reply_to(message, "❌ You're not allowed!")
-    
-    tips = [
-        "Did you know you can convert text to voice using /speak?",
-        "Try our PDF creation tools with /pdf command!",
-        "Share your referral link to earn points!",
-        "Download YouTube videos by simply sending the URL!",
-        "Upload an image to apply cool filters!"
-    ]
-    
-    text = f"🌟 *Daily Tip from Kirmada~* ✨\n\n{random.choice(tips)}"
-    group_id = -100123456789  # Replace with your group/channel ID
-    
-    try:
-        bot.send_message(group_id, text, parse_mode="Markdown")
-        bot.reply_to(message, "✅ Daily post sent successfully!")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Failed to send daily post: {str(e)}")
-
-# Add more error handling
-@bot.message_handler(func=lambda message: True)
-def default_handler(message):
-    # This handles any messages that don't match other handlers
-    bot.reply_to(message, "I'm not sure what you mean. Try /help for available commands!")
-
-print("Bot is running...")
-bot.infinity_polling()
+            bot.reply_to(message, f"✅ Added text ({count} items).
