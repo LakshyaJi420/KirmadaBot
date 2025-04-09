@@ -1,226 +1,256 @@
+# main.py
 import telebot
 import os
+import requests
+from pytube import YouTube
+from fpdf import FPDF
+from gtts import gTTS
 from telebot import types
-import json
 
-# Set API Key securely
+# Get API key from Railway environment variable
 API_KEY = os.environ.get("BOT_TOKEN")
-if not API_KEY:
-    # Fallback for testing - remove in production
-    API_KEY = "YOUR_BOT_TOKEN_HERE"  # Replace with your token for testing only
-
 bot = telebot.TeleBot(API_KEY)
 
-# Constants
-OWNER_ID = 7428805370  # Your owner ID
+# Owner/Admin configuration
+OWNER_ID = 7428805370
+
+# In-memory storage for users, referrals, and points
 USERS = set()
 POINTS = {}
-PREMIUM_USERS = set()
-USAGE_LIMITS = {}
-REFERRALS = {}
 
-# Database functions (simple file-based)
-def load_data():
-    global USERS, POINTS, PREMIUM_USERS, REFERRALS, USAGE_LIMITS
-    try:
-        if os.path.exists('database.json'):
-            with open('database.json', 'r') as f:
-                data = json.load(f)
-                USERS = set(data.get('users', []))
-                POINTS = {int(k): v for k, v in data.get('points', {}).items()}
-                PREMIUM_USERS = set(data.get('premium', []))
-                REFERRALS = {int(k): v for k, v in data.get('referrals', {}).items()}
-                USAGE_LIMITS = {int(k): v for k, v in data.get('usage_limits', {}).items()}
-    except Exception as e:
-        print(f"Error loading data: {e}")
+# Temporary storage for PDF tool inputs per user
+temp_pdf = {}
 
-def save_data():
-    try:
-        data = {
-            'users': list(USERS),
-            'points': POINTS,
-            'premium': list(PREMIUM_USERS),
-            'referrals': REFERRALS,
-            'usage_limits': USAGE_LIMITS
-        }
-        with open('database.json', 'w') as f:
-            json.dump(data, f)
-    except Exception as e:
-        print(f"Error saving data: {e}")
+# --------------------------
+# Utility Functions
+# --------------------------
 
-# Load data at startup
-load_data()
+def get_affiliate_message():
+    """
+    Returns a standard affiliate message to be appended after downloads.
+    """
+    return "\n\nWant cool tools? Check out our deals: [Buy Tools Cheap](https://amzn.to/3xXWlink)"
 
-# Main menu markup
-def get_main_menu():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("📹 YouTube Download", callback_data='youtube'),
-        types.InlineKeyboardButton("📱 Instagram Reel", callback_data='insta')
-    )
-    markup.add(
-        types.InlineKeyboardButton("📄 PDF Tools", callback_data='pdf'),
-        types.InlineKeyboardButton("🎁 Refer & Earn", callback_data='refer')
-    )
-    markup.add(
-        types.InlineKeyboardButton("💰 My Points", callback_data='points'),
-        types.InlineKeyboardButton("✨ Premium", callback_data='premium')
-    )
-    return markup
+def give_points(user_id, points=2):
+    """
+    Add referral points to a user.
+    """
+    if user_id not in POINTS:
+        POINTS[user_id] = 0
+    POINTS[user_id] += points
 
-# Start Command
+# --------------------------
+# Bot Commands and Handlers
+# --------------------------
+
+# /start command: Welcome message with inline keyboard for tools and referral info.
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.from_user.id
     USERS.add(user_id)
-    save_data()
-    
-    if message.from_user.id == OWNER_ID:
-        bot.reply_to(message, "💠 Welcome back, Master Kirmada-sama~ 💕\n\nType /panel to view your owner tools.")
-    else:
-        welcome_text = """
+
+    # Referral logic: if /start has an extra parameter, award points to referrer
+    if message.text.startswith("/start "):
+        ref_id = message.text.split()[1]
+        if ref_id.isdigit() and int(ref_id) != user_id:
+            give_points(int(ref_id))
+
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("Download from YouTube", callback_data='youtube'))
+    markup.add(types.InlineKeyboardButton("Download Instagram Reel", callback_data='insta'))
+    markup.add(types.InlineKeyboardButton("PDF Tools", callback_data='pdf'))
+    markup.add(types.InlineKeyboardButton("Refer & Earn", callback_data='refer'))
+
+    bot.send_message(user_id, """
 ✨ *Welcome to KirmadaTheBot* ✨
 
-Your all-in-one solution for:
-• YouTube & Instagram downloads
-• PDF creation tools
-• Text-to-Speech conversion
-• Image effects and more!
+Download, Convert, Share — All in One Place!
+Earn rewards by sharing the bot!
+""", parse_mode="Markdown", reply_markup=markup)
 
-Earn rewards by using the bot and referring friends!
-"""
-        bot.send_message(user_id, welcome_text, parse_mode="Markdown", reply_markup=get_main_menu())
+# Callback queries to trigger commands via inline keyboard
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    if call.data == 'youtube':
+        bot.send_message(call.from_user.id, "Send a YouTube URL to download video or audio using /youtube command.")
+    elif call.data == 'insta':
+        bot.send_message(call.from_user.id, "Send an Instagram Reel URL using /insta command.")
+    elif call.data == 'pdf':
+        bot.send_message(call.from_user.id, "Use /pdf command to start converting text/photos into a PDF. Then send /done when finished.")
+    elif call.data == 'refer':
+        refer(call.message)  # reuse the referral command
 
-# Owner Panel
+# /refer: Displays user's referral points and referral link.
+@bot.message_handler(commands=['refer'])
+def refer(message):
+    uid = str(message.from_user.id)
+    link = f"https://t.me/KirmadaTheBot?start={uid}"
+    points = POINTS.get(message.from_user.id, 0)
+    bot.reply_to(message, f"You have {points} points.\nShare this link to earn more:\n{link}")
+
+# --------------------------
+# YouTube Download
+# --------------------------
+
+# /youtube: Prompts the user to send a YouTube URL.
+@bot.message_handler(commands=['youtube'])
+def youtube(message):
+    bot.reply_to(message, "Send a YouTube URL to download video or audio.")
+
+# Automatic handler for messages containing a YouTube URL.
+@bot.message_handler(func=lambda msg: 'youtube.com' in msg.text or 'youtu.be' in msg.text)
+def yt_download(message):
+    try:
+        yt = YouTube(message.text)
+        stream = yt.streams.get_highest_resolution()
+        # Clean file name if necessary (you might want to filter out special characters)
+        filename = yt.title + ".mp4"
+        stream.download(filename=filename)
+        with open(filename, 'rb') as f:
+            bot.send_video(message.chat.id, f, caption="Here's your video!" + get_affiliate_message(), parse_mode="Markdown")
+        os.remove(filename)
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+
+# --------------------------
+# Instagram Reel Downloader
+# --------------------------
+
+# /insta: Prompts the user to send an Instagram Reel URL.
+@bot.message_handler(commands=['insta'])
+def insta(message):
+    bot.reply_to(message, "Send an Instagram Reel URL to download.")
+
+# Dummy handler for Instagram URLs. (Many bots use third-party APIs or instruct users to use a website.)
+@bot.message_handler(func=lambda msg: 'instagram.com' in msg.text)
+def insta_reel(message):
+    try:
+        bot.reply_to(message, "Instagram downloading is limited on Telegram bots. Use this site: https://instasave.io")
+    except Exception as e:
+        bot.reply_to(message, "Failed to fetch reel.")
+
+# --------------------------
+# PDF Tools: Merge/Convert/Compress Text & Images
+# --------------------------
+
+# /pdf: Start collecting input for PDF creation.
+@bot.message_handler(commands=['pdf'])
+def pdf(message):
+    bot.reply_to(message, "Send multiple text messages or photos to convert into a PDF. When you're done, send /done.")
+
+# Collect text and photo messages for the PDF tool.
+@bot.message_handler(func=lambda m: True, content_types=['text', 'photo'])
+def pdf_collector(message):
+    uid = message.from_user.id
+    if uid not in temp_pdf:
+        temp_pdf[uid] = []
+    if message.content_type == 'text':
+        temp_pdf[uid].append(message.text)
+    elif message.content_type == 'photo':
+        file_info = bot.get_file(message.photo[-1].file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        filename = f"photo_{uid}.jpg"
+        with open(filename, 'wb') as f:
+            f.write(downloaded)
+        temp_pdf[uid].append(filename)
+
+# /done: Process collected inputs into a PDF and send it to the user.
+@bot.message_handler(commands=['done'])
+def create_pdf(message):
+    uid = message.from_user.id
+    if uid in temp_pdf and temp_pdf[uid]:
+        pdf = FPDF()
+        for item in temp_pdf[uid]:
+            if isinstance(item, str) and item.endswith(".jpg"):
+                pdf.add_page()
+                pdf.image(item, x=10, y=10, w=180)
+                os.remove(item)
+            else:
+                pdf.add_page()
+                pdf.set_font("Arial", size=12)
+                pdf.multi_cell(0, 10, item)
+        file = f"{uid}_output.pdf"
+        pdf.output(file)
+        with open(file, 'rb') as f:
+            bot.send_document(message.chat.id, f, caption="Here's your PDF!" + get_affiliate_message(), parse_mode="Markdown")
+        os.remove(file)
+        temp_pdf.pop(uid)
+    else:
+        bot.reply_to(message, "You haven't added anything yet!")
+
+# --------------------------
+# Text-to-Speech (Convert Text to Voice)
+# --------------------------
+
+# /speak: Converts provided text into an audio message.
+@bot.message_handler(commands=['speak'])
+def tts(message):
+    text = message.text.replace('/speak', '').strip()
+    if not text:
+        return bot.reply_to(message, "Type some text after /speak like this: /speak Hello!")
+    try:
+        tts = gTTS(text)
+        filename = f"speech_{message.from_user.id}.mp3"
+        tts.save(filename)
+        with open(filename, 'rb') as f:
+            bot.send_audio(message.chat.id, f)
+        os.remove(filename)
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+
+# --------------------------
+# Casual Replies for Greetings
+# --------------------------
+
+@bot.message_handler(func=lambda m: m.text.lower() in ['hi', 'hello', 'hey', "what’s up"])
+def greet(message):
+    bot.reply_to(message, f"Hi {message.from_user.first_name}! I’m Kirmada~ Your smart helper bot!")
+
+# --------------------------
+# Owner/Admin Panel and Commands
+# --------------------------
+
+# /panel: Displays admin tools.
 @bot.message_handler(commands=['panel'])
 def panel(message):
-    if message.from_user.id == OWNER_ID:
-        stats = f"👥 Total Users: {len(USERS)}\n💎 Premium Users: {len(PREMIUM_USERS)}"
-        bot.reply_to(message, f"👑 *Owner Panel*\n\n{stats}\n\n- /broadcast\n- /stats\n- /test\n- /users\nMore coming~ 💋", parse_mode="Markdown")
-    else:
-        bot.reply_to(message, "This command is for the Owner only 🫢")
+    if message.from_user.id != OWNER_ID:
+        return
+    bot.reply_to(message, "👑 *Owner Panel*\n- /broadcast <msg>\n- /users\n- /test\n- /post_daily", parse_mode="Markdown")
 
-# Test Command for Owner
+# /users: Shows total number of users.
+@bot.message_handler(commands=['users'])
+def show_users(message):
+    if message.from_user.id == OWNER_ID:
+        bot.reply_to(message, f"Total Users: {len(USERS)}")
+
+# /broadcast: Sends a broadcast message to all users.
+@bot.message_handler(commands=['broadcast'])
+def broadcast(message):
+    if message.from_user.id != OWNER_ID:
+        return
+    text = message.text.replace('/broadcast', '').strip()
+    for user in USERS:
+        try:
+            bot.send_message(user, f"[Broadcast]\n{text}")
+        except Exception as e:
+            pass
+
+# /test: Owner test command.
 @bot.message_handler(commands=['test'])
 def test(message):
     if message.from_user.id == OWNER_ID:
-        bot.reply_to(message, "🔬 Test successful! You're seeing this as the Admin.")
-    else:
-        bot.reply_to(message, "You're a normal user~ 😋")
+        bot.reply_to(message, "Admin mode is active. All functions working fine!")
 
-# Stats Command for Owner
-@bot.message_handler(commands=['stats'])
-def stats(message):
-    if message.from_user.id == OWNER_ID:
-        stats_text = f"""
-📊 *Bot Statistics*
+# /post_daily: Automatically posts a daily message to a specified group/channel.
+@bot.message_handler(commands=['post_daily'])
+def post_daily(message):
+    if message.from_user.id != OWNER_ID:
+        return bot.reply_to(message, "You’re not allowed!")
+    text = "Here's your daily tip from Kirmada~ ✨\nDid you know you can convert text to voice using /speak?"
+    group_id = -100123456789  # Replace with your actual group/channel ID
+    bot.send_message(group_id, text)
 
-👥 Users: {len(USERS)}
-💎 Premium Users: {len(PREMIUM_USERS)}
-🔄 Total Referrals: {sum(len(refs) for refs in REFERRALS.values())}
-        """
-        bot.reply_to(message, stats_text, parse_mode="Markdown")
-    else:
-        bot.reply_to(message, "This command is for the Owner only 🫢")
-
-# Callback Handler
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    user_id = call.from_user.id
-    
-    if call.data == 'youtube':
-        bot.send_message(user_id, "🎬 Send a YouTube URL to download video or audio")
-    
-    elif call.data == 'insta':
-        bot.send_message(user_id, "📱 Send Instagram Reel or Post URL")
-    
-    elif call.data == 'pdf':
-        bot.send_message(user_id, "📄 Send text starting with /pdf_text to convert to PDF")
-    
-    elif call.data == 'refer':
-        link = f"https://t.me/KirmadaTheBot?start={user_id}"
-        points = POINTS.get(user_id, 0)
-        referrals = len(REFERRALS.get(user_id, []))
-        
-        bot.send_message(user_id, f"🔗 *Your Referral Link*\n{link}\n\n📊 Stats:\n- Points: {points}\n- Referrals: {referrals}\n\nEarn 5 points for each new user!", parse_mode="Markdown")
-    
-    elif call.data == 'points':
-        points = POINTS.get(user_id, 0)
-        bot.send_message(user_id, f"💰 *Your Points*: {points}\n\nEarn points by:\n- Daily login: +1 point\n- Referrals: +5 points per user\n- Using features: +2 points", parse_mode="Markdown")
-    
-    elif call.data == 'premium':
-        premium_status = "✅ ACTIVE" if user_id in PREMIUM_USERS else "❌ INACTIVE"
-        benefits = """
-✨ *Premium Benefits*:
-• No daily usage limits
-• No ads/affiliate links
-• 5x daily bonus points
-• Priority processing
-• Exclusive features
-        """
-        bot.send_message(user_id, f"💎 *Premium Status*: {premium_status}\n{benefits}\n\nCurrent Points: {POINTS.get(user_id, 0)}", parse_mode="Markdown")
-    
-    # Clear the callback query
-    bot.answer_callback_query(call.id)
-
-# Normal Commands
-@bot.message_handler(commands=['youtube'])
-def youtube(message):
-    bot.reply_to(message, "📥 Send me a YouTube link to download.")
-
-@bot.message_handler(commands=['insta'])
-def insta(message):
-    bot.reply_to(message, "🎞️ Send me an Instagram reel link to save.")
-
-@bot.message_handler(commands=['pdf'])
-def pdf(message):
-    bot.reply_to(message, "📄 Send a PDF to begin editing or converting.")
-
-@bot.message_handler(commands=['help'])
-def help_command(message):
-    help_text = """
-📚 *Available Commands*:
-
-• /start - Start the bot
-• /youtube - Download YouTube videos
-• /insta - Save Instagram reels
-• /pdf - PDF tools
-• /refer - Refer friends
-• /points - Check your points
-• /premium - Premium features
-• /help - Show this message
-
-Send me a YouTube or Instagram link to get started!
-"""
-    bot.reply_to(message, help_text, parse_mode="Markdown")
-
-# Handle simple text messages
-@bot.message_handler(content_types=['text'])
-def handle_text(message):
-    text = message.text.lower()
-    
-    # Handle YouTube links
-    if 'youtube.com' in text or 'youtu.be' in text:
-        bot.reply_to(message, "I see you sent a YouTube link! This feature is coming soon.")
-        return
-        
-    # Handle Instagram links
-    if 'instagram.com' in text:
-        bot.reply_to(message, "I see you sent an Instagram link! This feature is coming soon.")
-        return
-    
-    # For other random messages
-    if text in ['hi', 'hello', 'hey']:
-        bot.reply_to(message, f"Hey {message.from_user.first_name}! How can I help you today? Try /help for commands.")
-    else:
-        bot.reply_to(message, "I'm not sure what you mean. Try /help for available commands.")
-
-# Start the bot
-if __name__ == "__main__":
-    print("Bot starting...")
-    try:
-        print(f"Bot username: {bot.get_me().username}")
-        print("Bot is running - press Ctrl+C to stop")
-        bot.infinity_polling(timeout=20, long_polling_timeout=5)
-    except Exception as e:
-        print(f"Bot error: {e}")
+# --------------------------
+# Start the Bot
+# --------------------------
+bot.infinity_polling()
